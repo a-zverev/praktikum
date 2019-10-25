@@ -1,0 +1,108 @@
+## Работа на удаленном сервере
+Управление сервером по протоколу ssh. Мы можем получить доступ как к удаленному терминалу, так и к файловой системе удаленного сервера.
+Для работы с удаленным сервером нужно знать несколько параметров:
+
+* адрес сервера: 178.236.129.66
+* порт для подключения: 9911
+* логин и пароль
+
+#### Linux
+Утилита для удаленного управления терминалом ssh - уже установлена.  Для монтирования разделов сервера к вашей файловой системе понадобится sshfs. Инструкции по установке [здесь](https://habr.com/en/post/52310/) 
+
+* Монтирование разделов сервера: 
+
+`sshfs perstuds@178.236.129.66:/home/perstuds/zverev /home/alister_ari/Praktikum -p 9911 -o uid=1000`
+
+* Подключение к удаленному терминалу:
+
+`ssh perstuds@178.236.129.66 -p 9911`
+
+#### Windows
+Для удаленной работы нужно скачать и установить ssh-клиент. Например, Bitwise SSH Client - его можно скачать [здесь](https://www.bitvise.com/ssh-client-download). В соответствующих полях заполните адрес сервера, порт, имя пользователя и пароль. После подключения вам доступен удаленный терминал и окно обмена файлами.
+
+### Правила безопасности
+
+Поскольку мы все работаем от имени одного пользователя, у нас единое рабочее пространство. Чтобы не мешать друг другу, обязательное требование - каждый должен создать свою папку и работать только в ней.
+
+* Ваша рабочая директория должна выглядеть как `/home/perstuds/your_name/`
+
+## Менеджер сессий tmux
+Чтобы не потерять данные после закрытия терминала, создайте свою сессию в менеджере сессий. Задачи, запущенные в tmux, остаются активными после обрыва соединения.
+
+* Создать именованную сессию: `tmux new-session -s your_name`
+* Посмотреть список сессий: `tmux ls`
+* Подключиться к текущей сессии `tmux attach -t your_name`
+
+## Утилиты и исходные данные
+
+Для работы нам понадобятся утилиты trimmomatic, fastq-join, biom и vsearch. Они установлены в окружении bioinf. Скрипты QIIME доступны в окружении qiime1.Перед работой убедитесь, что нужные программы вам доступны. Вам также потребуются следующие данные:
+
+* файлы прочтений, прямые и обратные
+* файл карты (map)
+* референсная база данных
+
+## Тримминг и объединение последовательностей
+
+Для удаления ошибочно прочтитанных последовательностей и объединения прямых и обратных ридов мы используем trimmomatic (инструкция [здесь](http://usadellab.org/cms/?page=trimmomatic)) fastq-join (инструкция [здесь](https://github.com/brwnj/fastq-join)). Чтобы не считать все по одному файлу, воспользуемся циклом bash.
+
+Для начала создадим файл с названиями наших образцов, используя файл карты `map.txt`:
+
+    lenMap=`wc -l map.txt | cut -f 1 -d " "`
+    for (( i=2; i <= ${lenMap}; i++ )); do
+        line=`sed -n -e ${i}p map.txt`;
+        sampleID=`echo ${line} | awk '{print $1}'`
+        prefix=`echo ${line} | awk '{print $2}'`
+        echo ${sampleID} >> samples.txt
+        done
+
+Тримминг и объединение последовательностей:
+
+    mkdir trimmed
+    mkdir tmp_trimmed
+    for sample in $(cat samples.txt); do
+        echo ${sample};
+        dirname="tmp_trimmed/${sample}";
+        forward="raw_data/${sample}_L001_R1_001.fastq.gz";
+        reverse="raw_data/${sample}_L001_R2_001.fastq.gz";
+        mkdir ${dirname};
+        trimmomatic PE -phred33
+                ${forward} \
+                ${reverse} \
+                ${dirname}/trimed_paired_forward.fastq.gz \
+                ${dirname}/trimed_upaired_forward.fastq.gz \
+                ${dirname}/trimed_paired_reverse.fastq.gz \
+                ${dirname}/trimed_unpaired_reverse.fastq.gz \
+                SLIDINGWINDOW:4:12 MINLEN:180;
+        fastq-join
+                ${dirname}/trimed_paired_forward.fastq.gz \
+                ${dirname}/trimed_paired_reverse.fastq.gz \
+                -o ${dirname}/trimmed_%.fastq.gz;
+        cp ${dirname}/trimmed_join.fastq.gz \
+        trimmed/${sample}.fastq.gz;
+        done
+    rm tmp_trimmed -r
+
+## Удаление химер
+
+vsearch - многофункциональный инструмент для работы с .fasta-файлами, но мы будем использовать его для поиска химер. Два режима - поиск химер de novo и по базе данных. Ссылка на утилиту [здесь](https://github.com/torognes/vsearch)
+Это самый ресурсозатратный шаг обработки, может занимать несколько часов.
+
+    mkdir dechimered
+    mkdir tmp_dechimered
+    databasefna='/home/perstuds/tax_n_refs/silva_132_97_16S.fna'
+    for sample in $(cat samples.txt); do
+        echo ${sample};
+        dirname="tmp_dechimered/${sample}";
+        mkdir ${dirname}
+        cp trimmed/${sample}.fastq.gz ${dirname}/${sample}.fastq.gz
+        gzip -d ${dirname}/${sample}.fastq.gz;
+        sed -n '1~4s/^@/>/p;2~4p' \
+                    ${dirname}/${sample}.fastq > ${dirname}/${sample}.fna
+        vsearch \
+            --uchime_ref ${dirname}/${sample}.fna\
+            --nonchimeras ${dirname}/dechim_${sample}.fna\
+            --db ${databasefna} --threads 6;
+        mv ${dirname}/dechim_${sample}.fna \
+            dechimered/${sample}.fna;
+        done
+    rm -r tmp_dechimered
